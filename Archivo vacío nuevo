@@ -1,0 +1,356 @@
+/*Examen Jorge*/
+1.-PROCEDIMIENTO INSERTAR LINEA DE PEDIDO ILP
+
+
+/* Creacion de tabla log_errores */
+create table log_errores(error_mensaje varchar(200) null default null)
+
+
+/* Funciones creadas para sacar los datos de "elproducto" */
+-- Funcion existencias
+CREATE DEFINER=`ausias2`@`%` FUNCTION `existencias`(`elproducto` INT)
+	RETURNS int(11)
+	LANGUAGE SQL
+	NOT DETERMINISTIC
+	CONTAINS SQL
+	SQL SECURITY DEFINER
+	COMMENT ''
+BEGIN
+declare valor_existencias INT default 0;
+select existencias into valor_existencias
+from producto
+where idproducto = elproducto;
+return valor_existencias;
+END
+
+-- Funcion precioE
+CREATE DEFINER=`ausias2`@`%` FUNCTION `precioD`(`elproducto` INT)
+	RETURNS double(15,2)
+	LANGUAGE SQL
+	NOT DETERMINISTIC
+	CONTAINS SQL
+	SQL SECURITY DEFINER
+	COMMENT ''
+BEGIN
+declare valor_precioD real(15,2);
+select precioD into valor_precioD
+from producto
+where idproducto = elproducto;
+return valor_precioD;
+END
+-- Funcion precioD
+CREATE DEFINER=`ausias2`@`%` FUNCTION `precioE`(`elproducto` INT)
+	RETURNS double(15,2)
+	LANGUAGE SQL
+	NOT DETERMINISTIC
+	CONTAINS SQL
+	SQL SECURITY DEFINER
+	COMMENT ''
+BEGIN
+declare valor_precioE real(15,2);
+select precioE into valor_precioE
+from producto
+where idproducto = elproducto;
+return valor_precioE;
+END
+
+
+/* PROCEDIMIENTO ILP*/
+CREATE DEFINER=`ausias2`@`%` PROCEDURE `ILP_examen`(IN `elpedido` INT, IN `elproducto` INT, IN `lacantidad` INT)
+	LANGUAGE SQL
+	NOT DETERMINISTIC
+	CONTAINS SQL
+	SQL SECURITY DEFINER
+	COMMENT ''
+BEGIN
+/* este procedimiento controla el proceso de insercción de una lína de pedido, se comprueba que existe el pedido (en caso de no existir no se hace nada),
+si existe el pedido se comprueba si ya hay una línea de pedido para el artículo (si no hay se idebería de insertar),
+si ya hay una línea de pedido se pueden producir varias situaciones:
+1.- Se trata de una devolución (cantidad negativa), en este caso pueden pasar dos cosas
+	a) devuelven menos de lo que compraron ---> se actualiza la cantidad y ya está.
+	b) devuelbven tanto como compraron ----> en ese caso hay que dar de baja la línea de pedido
+2.- Si no hay línea de pedido, pueden pasar dos cosas:
+   a) Si hay existencias suficientes  ---> se inserta una línea
+   b)n si no hay existencias suficientes NO se hace nada (no se puede vender lo que no se tiene)
+ 
+ En el siguiente código figura toda la lógica del proceso, se usa una tabla de errores  para comprobar todas las situaciones posibles.
+ El procedimiento se activa mediante un call, ejemplos:
+   call ilp(10248,10,10);   linea de pedido que no existe 
+   call ilp(15248,10,10);   pedido que no existe
+   call ilp(10248,11,-2);  devolución de mercancia
+   call ilp(10248,11,-13);  devolución de mercancia, como quieren devolver más de lo que compraon es una baja de la línea d pedido
+SE DEBEN ACTUALIZAR LAS EXISTENCIAS CUANDO SEA NECESARIO
+  NOTA: Los nombres de las funciones no coinciden con los usados en calse.
+*/
+
+
+declare v_cantidad int default 0; -- contendrá la cantidad de la línea de pedido si existe, para controlar que la actualización no da negativo
+declare v_existencias int default 0;
+declare v_preE real(15,2) default 0;
+declare v_preD real(15,2) default 0;
+set v_existencias = existencias(elproducto);
+set v_preE = precioE(elproducto);
+set v_preD = precioD(elproducto);
+-- declare v_existencias varchar(80) default ''; -- contendrá datos del producto, existencias, precioE y precioD, 
+-- yo no la uso pero es posible que se necesite, en ese caso  con la sentencia: set v_existencias = existencias_pro(12) se obtienen los datos deseados. 
+  
+if existe_pedido(elpedido)='SI' 
+ then 
+  insert into log_errores values (concat('Fecha: ',now(),'. El registro -pedido- consultado SI existe: ', elpedido,' .El usuario es: ',user()));
+   if existe_linea(elpedido,elproducto)='NO' 
+     then
+     /*seria una inserccion si hay cantidad suficiente, necesitamos obtener las existencias, el precio en euros y el precio en dolares desde la tabla productos
+	  Uso las 3 funciones creada para obtener las existencias,precioEy precioD*/
+	if v_existencias >= lacantidad then 
+	insert into detalle_pedido values (elpedido, elproducto, v_preD, v_preE, lacantidad);
+	-- Actualizamos las existencias disponibles para el producto
+	update producto 
+ 	set existencias = existencias - lacantidad
+ 	where idProducto = elproducto;
+       insert into log_errores values (concat('Fecha: ',now(),'.No existe la línea de pedido. Seria una inserccion. La cantidad es ', lacantidad,' .El usuario es: ',user()));
+       insert into log_errores values ( concat(elpedido,'-',elproducto,'-',v_preD,'-',v_preE,'-',lacantidad,' es una insercción en detallepedido y el usuario es:  ', user()));
+       end if;
+     else -- ya existe una linea de pedido del articulo
+         select cantidad into v_cantidad from detalle_pedido where idpedido=elpedido and idproducto=elproducto;
+       	if (v_cantidad + lacantidad ) > 0
+         then   
+					
+				-- update, pues la candidad a devolver es menor que la comprada
+			        insert into log_errores values (concat('Fecha: ',now(),'.Existe la línea, seria una actualización. La cantidad es ', lacantidad,' .El usuario es: ',user()));
+               			-- la sentencia sería update detalle_pedido set.....
+               			update detalle_pedido
+     				set cantidad = cantidad+lacantidad
+     				where idPedido = elpedido and idProducto = elproducto;
+				-- Actualizamos las existencias disponibles para elproducto
+				update producto 
+ 				set existencias = existencias - lacantidad
+ 				where idProducto = elproducto;
+               
+		   else   -- es un borrado, pues la cantiadad a devolver es igual o mayor a la comprada
+	          insert into log_errores values (concat('Fecha: ',now(),'.Existe la línea, seria UN borrado. La cantidad es ', lacantidad,' .Y las ventas erán de: ',v_cantidad));  
+	          		-- la sentencia seria delete detalle_pedido ........
+	            		delete from detalle_pedido
+     				where idPedido = elpedido and idProducto = elproducto;
+				 -- Actualizamos las existencias disponibles para elproducto
+				update producto
+ 				set existencias = existencias - lacantidad
+ 				where idProducto = elproducto;
+			end if;
+	   
+    end if;
+else 
+   insert into log_errores values (concat('Fecha: ',now(),'. El registro consultado NO existe: ', elpedido,' .El usuario es: ',user()));
+end if;
+
+
+END
+
+
+
+
+
+
+2.- INCENTIVOS
+
+
+/*añadir la columna Incentivos en la tabla empleado*/
+ALTER TABLE `empleado`
+	ADD COLUMN `Incentivos` DOUBLE(6,2) NULL;
+
+
+/* Funcion ventas_emple_año */
+CREATE DEFINER=`ausias2`@`%` FUNCTION `ventas_emple_año`(`elempleado` INT, `elaño` INT)
+	RETURNS dOUBLE
+	LANGUAGE SQL
+	NOT DETERMINISTIC
+	CONTAINS SQL
+	SQL SECURITY DEFINER
+	COMMENT ''
+BEGIN
+declare v_idempleado int;
+declare v_ventas double default 0;
+select sum(cantidad*precioE) into v_ventas
+from empleado e, detalle_pedido d, pedido p
+where e.idEmpleado = p.idEmpleado and 
+		p.idPedido = d.idPedido and
+		year(fechaPedido)= elaño and
+		e.idempleado= elempleado
+group by e.idempleado;
+return v_ventas;
+END
+
+
+/* Procedimiento emple_complemento*/
+CREATE DEFINER=`ausias2`@`%` PROCEDURE `emple_complemento`()
+	LANGUAGE SQL
+	NOT DETERMINISTIC
+	CONTAINS SQL
+	SQL SECURITY DEFINER
+	COMMENT ''
+begin
+-- variables
+declare HayMasRegistros bool default true;
+declare elempleado varchar(3) default '';
+declare ventas_elempleado double default 0;
+-- el cursor
+declare elcursor cursor for select idempleado
+from empleado;
+
+
+declare continue handler
+for SQLSTATE '02000'
+set HayMasRegistros = false;
+
+
+-- open the cursor
+open elcursor;
+fetch elcursor into     elempleado;
+while HayMasRegistros do
+-- operaciones  aquí
+if (ventas_emple_anyo(elempleado,1996)>50000 && ventas_emple_anyo(elempleado,1997)>50000 && ventas_emple_anyo(elempleado,1998)>50000)  then
+update  empleado     set Incentivos= 200 where idempleado=elempleado;
+
+
+elseif (ventas_emple_anyo(elempleado,1996)   && ventas_emple_anyo(elempleado,1997) between 30000 and 50000 && ventas_emple_anyo(elempleado,1998) between 30000 and 50000)  then
+update  empleado     set Incentivos= 100 where idempleado=elempleado;
+else
+update  empleado     set Incentivos = 50 where idempleado=elempleado;
+end if;
+fetch elcursor into     elempleado;
+end while;
+close elcursor;
+end
+
+
+3.- OPCION B
+
+
+/* Funcion que calcule el valor de las existencias ed los productos suministrados por un proveedor*/
+
+
+CREATE DEFINER=`ausias2`@`%` FUNCTION `existencias_proveedor`(`elproveedor` INT)
+	RETURNS double
+	LANGUAGE SQL
+	NOT DETERMINISTIC
+	CONTAINS SQL
+	SQL SECURITY DEFINER
+	COMMENT ''
+BEGIN
+declare v_existencias int;
+
+
+select sum(existencias) into v_existencias
+from proveedor p, producto pr
+where p.idProveedor = pr.idProveedor
+and p.idProveedor =elproveedor
+group by p.idProveedor;
+return v_existencias;
+END
+
+
+
+
+/* Funcion que calcule el importe de las ventas de una oficina en un año determinado*/
+
+
+CREATE DEFINER=`ausias2`@`%` FUNCTION `ventas_oficina`(`laoficina` INT, `elaño` INT)
+	RETURNS double
+	LANGUAGE SQL
+	NOT DETERMINISTIC
+	CONTAINS SQL
+	SQL SECURITY DEFINER
+	COMMENT ''
+BEGIN
+declare ventas double;
+select sum(d.cantidad*d.precioE) into ventas
+from oficina o, empleado e, pedido p, detalle_pedido d
+where o.idOficina = e.idOficina and
+e.idempleado = p.idEmpleado and
+p.idPedido = d.idPedido and
+o.idOficina=laoficina and
+year(p.fechapedido)= elaño
+group by o.idOficina;
+
+
+return ventas;
+END
+
+
+
+
+---------------
+
+
+ME CAGO EN SU PUTA VIDA
+
+
+Nota: El procedimiento no peta por la media o los ifs porque ya he probao a quitarlos y hacer mierdas sencillas.
+
+
+CREATE DEFINER=`root`@`%` PROCEDURE `cliente_descuento`()
+	LANGUAGE SQL
+	NOT DETERMINISTIC
+	CONTAINS SQL
+	SQL SECURITY DEFINER
+	COMMENT ''
+BEGIN
+
+declare finregistros int default 0;
+declare elcliente text;
+declare mediacompras real(12,2);
+
+declare elcursor cursor for select idCliente
+from cliente;
+
+declare continue handler for not found
+set finregistros=1;
+
+
+open elcursor;
+fetch elcursor into elcliente;
+
+while finregistros=0 do
+ set mediacompras=(compras_cli_anyo(elcliente,'1996')+compras_cli_anyo(elcliente,'1997')+compras_cli_anyo(elcliente,'1998'))/3;
+ if (mediacompras >= 5000) then
+ update cliente set descuento=5 where idCliente=elcliente collate utf8_general_ci;
+ elseif (mediacompras between  3000 and  5000) then
+ update cliente set descuento=2  where idCliente=elcliente collate utf8_general_ci;
+ else
+ update cliente set descuento=0  where idCliente=elcliente collate utf8_general_ci;
+ end if;
+end while;
+
+close elcursor;
+
+END
+
+
+-----
+
+
+función compras_cli_anyo
+
+
+CREATE DEFINER=`root`@`%` FUNCTION `compras_cli_anyo`(
+	`elcliente` TEXT,
+	`lafecha` INT
+
+)
+RETURNS double
+LANGUAGE SQL
+NOT DETERMINISTIC
+CONTAINS SQL
+SQL SECURITY DEFINER
+COMMENT ''
+BEGIN
+
+declare valortotal real(12,2) default 0;
+
+select sum(cantidad*precioE) into valortotal
+from pedido p, detalle_pedido d
+where p.idPedido=d.idPedido and p.idCliente=elcliente collate utf8_general_ci and year(p.fechaPedido)=lafecha;
+
+return valortotal;
+
+END
+
